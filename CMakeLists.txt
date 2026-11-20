@@ -45,17 +45,29 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-    Core/Src/adxl345.c
+      Core/Src/adxl345.c
+    Drivers/CMSIS/DSP/Source/TransformFunctions/TransformFunctions.c
+    Drivers/CMSIS/DSP/Source/CommonTables/CommonTables.c
+    Drivers/CMSIS/DSP/Source/ComplexMathFunctions/ComplexMathFunctions.c
+    Drivers/CMSIS/DSP/Source/StatisticsFunctions/StatisticsFunctions.c
+    Drivers/CMSIS/DSP/Source/FastMathFunctions/FastMathFunctions.c
+    Drivers/CMSIS/DSP/Source/BasicMathFunctions/BasicMathFunctions.c
+    Drivers/CMSIS/DSP/Source/SupportFunctions/SupportFunctions.c
+    Drivers/CMSIS/DSP/Source/MatrixFunctions/MatrixFunctions.c
+
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+        Drivers/CMSIS/DSP/Include
+    Drivers/CMSIS/DSP/PrivateInclude
 )
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    ARM_MATH_CM4
 )
 
 # Remove wrong libob.a library dependency when using cpp files
