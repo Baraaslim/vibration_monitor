@@ -19,12 +19,15 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "spi.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include <math.h>
+#include "adxl345.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,7 +37,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define N_SAMPLES 1000   /* 1000 samples at 1 kHz = 1 second of data */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -45,7 +48,16 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+static int16_t samples[2][N_SAMPLES][3];   /* 2 buffers x 1000 samples x (X,Y,Z) */
+static volatile uint16_t sample_idx = 0;   /* where the ISR writes next         */
+static volatile uint8_t  fill_buf   = 0;   /* which buffer the ISR is filling   */
+static volatile int8_t   ready_buf  = -1;  /* full buffer for main (-1 = none)  */
+static volatile uint32_t overruns   = 0;   /* main too slow? count it           */
+static adxl345_t accel = {
+  .hspi    = &hspi2,
+  .cs_port = ADXL_CS_GPIO_Port,
+  .cs_pin  = ADXL_CS_Pin,
+};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -56,53 +68,33 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* Send each printf character out of USART2 (to the PC) */
 int __io_putchar(int ch)
 {
   HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
   return ch;
 }
 
-static uint8_t adxl_read_reg(uint8_t reg)
+/* RMS of each axis over one buffer of N_SAMPLES, in milli-g */
+static void compute_rms(int16_t (*buf)[3], float rms_mg[3])
 {
-  uint8_t tx[2] = { 0x80 | reg, 0x00 };   /* command byte + dummy byte */
-  uint8_t rx[2] = { 0 };                  /* where the answers land    */
+  for (int axis = 0; axis < 3; axis++)
+  {
+    float sum = 0.0f;
+    for (int i = 0; i < N_SAMPLES; i++) sum += buf[i][axis];
+    float mean = sum / N_SAMPLES;                   /* gravity + offset */
 
-  HAL_GPIO_WritePin(ADXL_CS_GPIO_Port, ADXL_CS_Pin, GPIO_PIN_RESET); /* CS low: start  */
-  HAL_SPI_TransmitReceive(&hspi2, tx, rx, 2, HAL_MAX_DELAY);
-  HAL_GPIO_WritePin(ADXL_CS_GPIO_Port, ADXL_CS_Pin, GPIO_PIN_SET);   /* CS high: end   */
-
-  return rx[1];
+    float sum_sq = 0.0f;
+    for (int i = 0; i < N_SAMPLES; i++)
+    {
+      float d = buf[i][axis] - mean;                /* only the wiggle */
+      sum_sq += d * d;                              /* square it       */
+    }
+    rms_mg[axis] = sqrtf(sum_sq / N_SAMPLES) * 3.9f;  /* root of mean, in mg */
+  }
 }
 
-static void adxl_write_reg(uint8_t reg, uint8_t value)
-{
-  uint8_t tx[2] = { reg, value };   /* command byte (R/W=0, MB=0) + data byte */
-
-  HAL_GPIO_WritePin(ADXL_CS_GPIO_Port, ADXL_CS_Pin, GPIO_PIN_RESET);
-  HAL_SPI_Transmit(&hspi2, tx, 2, HAL_MAX_DELAY);
-  HAL_GPIO_WritePin(ADXL_CS_GPIO_Port, ADXL_CS_Pin, GPIO_PIN_SET);
-}
-
-static void adxl_init(void)
-{
-  adxl_write_reg(0x2C, 0x0F);   /* BW_RATE:     3200 Hz                         */
-  adxl_write_reg(0x31, 0x0B);   /* DATA_FORMAT: full res, +-16 g, 4-wire, right */
-  adxl_write_reg(0x2D, 0x08);   /* POWER_CTL:   MEASURE = 1 (start). Last!      */
-}
-
-static void adxl_read_xyz(int16_t *x, int16_t *y, int16_t *z)
-{
-  uint8_t tx[7] = { 0xF2, 0, 0, 0, 0, 0, 0 };  /* read + multi-byte from 0x32, then 6 dummies */
-  uint8_t rx[7] = { 0 };
-
-  HAL_GPIO_WritePin(ADXL_CS_GPIO_Port, ADXL_CS_Pin, GPIO_PIN_RESET);
-  HAL_SPI_TransmitReceive(&hspi2, tx, rx, 7, HAL_MAX_DELAY);
-  HAL_GPIO_WritePin(ADXL_CS_GPIO_Port, ADXL_CS_Pin, GPIO_PIN_SET);
-
-  *x = (int16_t)((rx[2] << 8) | rx[1]);
-  *y = (int16_t)((rx[4] << 8) | rx[3]);
-  *z = (int16_t)((rx[6] << 8) | rx[5]);
-}
 /* USER CODE END 0 */
 
 /**
@@ -136,36 +128,37 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_SPI2_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-  uint8_t devid = adxl_read_reg(0x00);
-  if (devid != 0xE5)
+   /* USER CODE BEGIN 2 */
+  if (adxl345_init(&accel))
   {
-    printf("ADXL345 not found! DEVID = 0x%02X\r\n", devid);
+    printf("ADXL345 found. Starting...\r\n");
+    HAL_TIM_Base_Start_IT(&htim2);
   }
   else
   {
-    printf("ADXL345 found. Starting...\r\n");
-    adxl_init();
+    printf("ADXL345 not found! Check wiring.\r\n");
   }
   /* USER CODE END 2 */
 
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-   while (1)
+     while (1)
   {
-    int16_t x, y, z;
-    adxl_read_xyz(&x, &y, &z);
+    if (ready_buf != -1)                       /* a full second of data? */
+    {
+      int8_t b = ready_buf;
+      float rms[3];
+      compute_rms(samples[b], rms);
+      ready_buf = -1;                          /* done: buffer free again */
 
-    int32_t x_mg = (int32_t)x * 39 / 10;   /* raw x 3.9 = milli-g */
-    int32_t y_mg = (int32_t)y * 39 / 10;
-    int32_t z_mg = (int32_t)z * 39 / 10;
-
-    printf("X = %5ld mg   Y = %5ld mg   Z = %5ld mg\r\n", x_mg, y_mg, z_mg);
-
-    HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-    HAL_Delay(200);
+      printf("RMS  X = %4d  Y = %4d  Z = %4d mg   (overruns: %lu)\r\n",
+             (int)rms[0], (int)rms[1], (int)rms[2], overruns);
+      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+    }
     /* USER CODE END WHILE */
-   
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -220,7 +213,23 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance != TIM2) return;          /* only react to TIM2 */
 
+  int16_t *s = samples[fill_buf][sample_idx];
+    adxl345_read_xyz(&accel, &s[0], &s[1], &s[2]);   /* ~30 us of SPI */
+  sample_idx++;
+
+  if (sample_idx >= N_SAMPLES)                 /* buffer full? */
+  {
+    if (ready_buf != -1) overruns++;           /* main didn't finish the last one */
+    ready_buf  = fill_buf;                     /* hand this buffer to main */
+    fill_buf  ^= 1;                            /* switch: 0 -> 1, 1 -> 0  */
+    sample_idx = 0;
+  }
+}
+  
 /* USER CODE END 4 */
 
 /**
